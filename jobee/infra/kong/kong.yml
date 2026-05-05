@@ -1,0 +1,24 @@
+# Kong declarative (DB-less) config.
+#
+# Sprint 0: gateway runs with NO routes. Hitting any path through Kong
+# returns 404 — that's expected.
+#
+# Sprint 1+: each service adds its own service + route block here, e.g.
+#
+#   services:
+#     - name: identity-service
+#       url: http://identity-service:8000
+#       routes:
+#         - name: identity-auth
+#           paths: ["/v1/auth"]
+#           strip_path: false
+#
+# Kong reloads this file on container restart.
+
+_format_version: "3.0"
+_transform: true
+
+services: []
+routes: []
+plugins: []
+consumers: []

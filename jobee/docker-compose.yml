@@ -1,0 +1,355 @@
+name: jobee
+
+networks:
+  jobee:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  kafka-data:
+  minio-data:
+  meilisearch-data:
+  grafana-data:
+  prometheus-data:
+  loki-data:
+  tempo-data:
+  pgadmin-data:
+
+services:
+  # -----------------------------------------------------------------------
+  # Data layer
+  # -----------------------------------------------------------------------
+
+  postgres:
+    image: postgres:16
+    container_name: jobee-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - jobee
+
+  redis:
+    image: redis:7-alpine
+    container_name: jobee-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - jobee
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: jobee-redis-commander
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "${REDIS_COMMANDER_PORT}:8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - jobee
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: jobee-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "${PGADMIN_PORT}:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - jobee
+
+  # -----------------------------------------------------------------------
+  # Event bus
+  # -----------------------------------------------------------------------
+
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: jobee-kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_PORT}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qg
+    ports:
+      - "${KAFKA_PORT}:9094"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - jobee
+
+  karapace:
+    image: ghcr.io/aiven/karapace:develop
+    container_name: jobee-karapace
+    restart: unless-stopped
+    entrypoint:
+      - /bin/bash
+      - /opt/karapace/start.sh
+      - registry
+    environment:
+      KARAPACE_ADVERTISED_HOSTNAME: karapace
+      KARAPACE_BOOTSTRAP_URI: kafka:9092
+      KARAPACE_PORT: 8081
+      KARAPACE_HOST: 0.0.0.0
+      KARAPACE_CLIENT_ID: karapace
+      KARAPACE_GROUP_ID: karapace-registry
+      KARAPACE_MASTER_ELIGIBILITY: "true"
+      KARAPACE_TOPIC_NAME: _schemas
+      KARAPACE_LOG_LEVEL: WARNING
+      KARAPACE_COMPATIBILITY: BACKWARD
+    ports:
+      - "${KARAPACE_PORT}:8081"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - jobee
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: jobee-kafka-ui
+    restart: unless-stopped
+    environment:
+      KAFKA_CLUSTERS_0_NAME: jobee-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://karapace:8081
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      karapace:
+        condition: service_started
+    networks:
+      - jobee
+
+  # -----------------------------------------------------------------------
+  # Search
+  # -----------------------------------------------------------------------
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.8
+    container_name: jobee-meilisearch
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
+      MEILI_ENV: development
+    ports:
+      - "${MEILI_PORT}:7700"
+    volumes:
+      - meilisearch-data:/meili_data
+    networks:
+      - jobee
+
+  # -----------------------------------------------------------------------
+  # Object storage
+  # -----------------------------------------------------------------------
+
+  minio:
+    image: minio/minio:latest
+    container_name: jobee-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jobee
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: jobee-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: ["/bin/sh", "/scripts/seed-buckets.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+    networks:
+      - jobee
+
+  # -----------------------------------------------------------------------
+  # Mail (dev only — captures outgoing emails)
+  # -----------------------------------------------------------------------
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: jobee-mailhog
+    restart: unless-stopped
+    ports:
+      - "${MAILHOG_SMTP_PORT}:1025"
+      - "${MAILHOG_UI_PORT}:8025"
+    networks:
+      - jobee
+
+  # -----------------------------------------------------------------------
+  # Antivirus
+  # -----------------------------------------------------------------------
+
+  clamav:
+    image: clamav/clamav:latest
+    container_name: jobee-clamav
+    restart: unless-stopped
+    ports:
+      - "${CLAMAV_PORT}:3310"
+    networks:
+      - jobee
+
+  # -----------------------------------------------------------------------
+  # API gateway
+  # -----------------------------------------------------------------------
+
+  kong:
+    image: kong:3.7
+    container_name: jobee-kong
+    restart: unless-stopped
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+    ports:
+      - "${KONG_PROXY_PORT}:8000"
+      - "${KONG_ADMIN_PORT}:8001"
+    volumes:
+      - ./infra/kong:/kong:ro
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jobee
+
+  # -----------------------------------------------------------------------
+  # Observability
+  # -----------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: jobee-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    ports:
+      - "${PROMETHEUS_PORT}:9090"
+    volumes:
+      - ./infra/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    networks:
+      - jobee
+
+  loki:
+    image: grafana/loki:latest
+    container_name: jobee-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "${LOKI_PORT}:3100"
+    volumes:
+      - loki-data:/loki
+    networks:
+      - jobee
+
+  tempo:
+    image: grafana/tempo:latest
+    container_name: jobee-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    ports:
+      - "${TEMPO_PORT}:3200"
+      - "${TEMPO_OTLP_GRPC_PORT}:4317"
+      - "${TEMPO_OTLP_HTTP_PORT}:4318"
+    volumes:
+      - ./infra/tempo:/etc/tempo:ro
+      - tempo-data:/var/tempo
+    networks:
+      - jobee
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: jobee-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports:
+      - "${GRAFANA_PORT}:3000"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - jobee
