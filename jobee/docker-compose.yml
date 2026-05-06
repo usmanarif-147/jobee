@@ -21,6 +21,29 @@ services:
   # Data layer
   # -----------------------------------------------------------------------
 
+  identity-service:
+    build:
+      context: ./services/identity-service
+      dockerfile: Dockerfile
+    container_name: jobee-identity-service
+    volumes:
+      - ./services/identity-service:/app # bind mount = live code reload                                                                                                           
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    networks:
+      - jobee # join the shared network so it can reach postgres/kafka                                                                                             
+    ports:
+      - "8011:8000" # expose to your laptop so you can curl it
+    environment:
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres # this is the hostname inside the jobee network
+      DB_PORT: 5432
+      DB_DATABASE: identity_db # we'll create this DB later                                                                                                                         
+      DB_USERNAME: identity_user
+      DB_PASSWORD: jobee_local_password
+      APP_URL: http://localhost:8011
+
   postgres:
     image: postgres:16
     container_name: jobee-postgres
@@ -34,7 +57,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER}" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -45,13 +68,13 @@ services:
     image: redis:7-alpine
     container_name: jobee-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    command: [ "redis-server", "--appendonly", "yes" ]
     ports:
       - "${REDIS_PORT}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -118,7 +141,7 @@ services:
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      test: [ "CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1" ]
       interval: 15s
       timeout: 10s
       retries: 10
@@ -208,7 +231,7 @@ services:
     volumes:
       - minio-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -224,7 +247,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    entrypoint: ["/bin/sh", "/scripts/seed-buckets.sh"]
+    entrypoint: [ "/bin/sh", "/scripts/seed-buckets.sh" ]
     volumes:
       - ./scripts:/scripts:ro
     networks:
@@ -280,7 +303,7 @@ services:
     volumes:
       - ./infra/kong:/kong:ro
     healthcheck:
-      test: ["CMD", "kong", "health"]
+      test: [ "CMD", "kong", "health" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -322,7 +345,7 @@ services:
     image: grafana/tempo:latest
     container_name: jobee-tempo
     restart: unless-stopped
-    command: ["-config.file=/etc/tempo/tempo.yml"]
+    command: [ "-config.file=/etc/tempo/tempo.yml" ]
     ports:
       - "${TEMPO_PORT}:3200"
       - "${TEMPO_OTLP_GRPC_PORT}:4317"
